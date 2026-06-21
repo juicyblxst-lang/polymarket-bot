@@ -1,0 +1,22 @@
+services:
+  - type: worker
+    name: polymarket-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python btc_sniper_bot.py
+    envVars:
+      - key: PRIVATE_KEY
+        value: 0xc920d644c816f7ab1894603904475342d1559d0ce72d848f7142bebf80aa44da
+      - key: CLOB_API_KEY
+        value: 019edc92-98b6-7cb2-999e-db5ee9de17e3
+      - key: CLOB_SECRET
+        value: 5ET5zdC3YnBRRjy0hMoSHwY2E0i9Zc4_gFvxCKn89ko=
+      - key: CLOB_PASSPHRASE
+        value: 6b00ee54064057d5f35033ac5bf2d0ec9a536919562cd711942dad0945ef9c80
+      - key: TELEGRAM_BOT_TOKEN
+        value: 8949632376:AAH4u0PCOvO_oi5ygnmlEyNuVx2DDMyalFU
+      - key: TELEGRAM_CHAT_ID
+        value: 8579537304
+      - key: MARKET_TOKEN_ID
+        value: 100824312187318380959439588742678408851068029073889761718679633905962383561267

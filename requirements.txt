@@ -1,0 +1,5 @@
+websockets
+py-clob-client
+python-telegram-bot
+python-dotenv
+requests
