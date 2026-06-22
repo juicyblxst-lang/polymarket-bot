@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-5-Minute BTC Sniper – Polymarket WebSocket + Binance Edge
-Dual‑source signal detection: Binance for early edge, Polymarket for confirmation.
+Polymarket 5-Minute BTC Sniper – WebSocket + Binance Edge
+Includes Flask web server for Render free tier compatibility.
 """
 
 import asyncio
@@ -9,6 +9,7 @@ import json
 import time
 import logging
 from collections import deque
+from threading import Thread
 
 import websockets
 from dotenv import load_dotenv
@@ -16,6 +17,7 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs
 from py_clob_client.order_builder.constants import BUY, SELL
 from telegram import Bot
+from flask import Flask
 
 load_dotenv()
 
@@ -35,12 +37,28 @@ PRICE_THRESHOLD = 0.003          # 0.3% move
 MIN_POSITION_SIZE = 5
 BID_ASK_SPREAD = 0.01
 
-# WebSocket URLs
 POLY_WS_URL = "wss://ws-subscriptions-frontend-clob.polymarket.com/ws/market"
 BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# FLASK WEB SERVER (Keeps Render happy)
+# ============================================================
+
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Bot is running!", 200
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_webserver():
+    app.run(host='0.0.0.0', port=10000)
 
 # ============================================================
 # TELEGRAM NOTIFIER
@@ -60,7 +78,7 @@ class TelegramNotifier:
 notifier = TelegramNotifier(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
 
 # ============================================================
-# POLYMARKET ORDER BOOK (unchanged)
+# POLYMARKET ORDER BOOK
 # ============================================================
 
 class PolymarketOrderBook:
@@ -101,7 +119,7 @@ class PolymarketOrderBook:
         return self.mid_price
 
 # ============================================================
-# POLYMARKET EXECUTOR (unchanged)
+# POLYMARKET EXECUTOR
 # ============================================================
 
 class PolymarketExecutor:
@@ -137,7 +155,7 @@ class PolymarketExecutor:
             await notifier.send(f"❌ Order failed: {e}")
             return None
 
-    async def execute_signal(self, direction, mid, source="Polymarket"):
+    async def execute_signal(self, direction, mid):
         if mid is None:
             return
         if direction == "UP":
@@ -148,20 +166,17 @@ class PolymarketExecutor:
             await self.place_order(SELL, sell_price, MIN_POSITION_SIZE)
 
 # ============================================================
-# BINANCE PRICE FEED (NEW – Adds the Edge)
+# BINANCE PRICE FEED (Edge)
 # ============================================================
 
 class BinancePriceFeed:
-    def __init__(self, executor, threshold=0.003, window_seconds=60):
-        self.executor = executor
+    def __init__(self, threshold=0.003, window_seconds=60):
         self.threshold = threshold
         self.window_seconds = window_seconds
         self.price_window = deque(maxlen=1000)
         self.last_signal_time = 0
-        self.last_price = None
 
     async def run(self):
-        """Connect to Binance WebSocket and monitor price moves."""
         while True:
             try:
                 async with websockets.connect(BINANCE_WS_URL) as ws:
@@ -169,27 +184,21 @@ class BinancePriceFeed:
                     async for raw in ws:
                         try:
                             data = json.loads(raw)
-                            if "p" in data:  # trade data
+                            if "p" in data:
                                 price = float(data["p"])
-                                self.last_price = price
                                 self.price_window.append((time.time(), price))
                                 self._check_signal()
                         except json.JSONDecodeError:
                             pass
-            except websockets.exceptions.ConnectionClosedError as e:
-                logger.warning(f"Binance WS disconnected: {e}")
-                await asyncio.sleep(2)
             except Exception as e:
                 logger.error(f"Binance WS error: {e}")
                 await asyncio.sleep(5)
 
     def _check_signal(self):
-        """Detect if price moved >= threshold within window_seconds."""
         if len(self.price_window) < 2:
             return
         now = time.time()
         cutoff = now - self.window_seconds
-        # Keep only recent window
         while self.price_window and self.price_window[0][0] < cutoff:
             self.price_window.popleft()
         if len(self.price_window) < 2:
@@ -199,17 +208,12 @@ class BinancePriceFeed:
         pct_move = (latest - oldest) / oldest
         if abs(pct_move) >= self.threshold and (now - self.last_signal_time) > 30:
             direction = "UP" if pct_move > 0 else "DOWN"
-            logger.info(f"🚨 Binance signal: {direction} {pct_move*100:.2f}% @ ${latest:.4f}")
+            logger.info(f"🚨 Binance signal: {direction} {pct_move*100:.2f}%")
             self.last_signal_time = now
-            # Execute trade using Binance signal (mid price from Polymarket will be fetched inside executor)
-            # We need to get current Polymarket mid price – we'll pass a function to fetch it.
-            # For simplicity, we'll use a placeholder: we'll call executor.execute_signal with direction and a dummy mid,
-            # but we need the actual Polymarket mid. We'll store a reference to the order book.
-            # We'll refactor to pass the book reference, but for now we'll just send a Telegram alert.
-            asyncio.create_task(notifier.send(f"🚨 Binance signal: BTC {direction} {pct_move*100:.2f}% @ ${latest:.4f}"))
+            asyncio.create_task(notifier.send(f"🚨 Binance signal: BTC {direction} {pct_move*100:.2f}%"))
 
 # ============================================================
-# POLYMARKET WEBSOCKET STREAM (unchanged)
+# POLYMARKET WEBSOCKET STREAM
 # ============================================================
 
 async def stream_order_book(token_id, book, executor):
@@ -242,7 +246,7 @@ async def stream_order_book(token_id, book, executor):
                                             if abs(pct_move) >= PRICE_THRESHOLD:
                                                 direction = "UP" if pct_move > 0 else "DOWN"
                                                 logger.info(f"🚨 Polymarket signal: {direction} {pct_move*100:.2f}%")
-                                                await executor.execute_signal(direction, mid, "Polymarket")
+                                                await executor.execute_signal(direction, mid)
                                                 price_history.clear()
                         else:
                             event_type = data.get("event_type") or data.get("type")
@@ -260,15 +264,12 @@ async def stream_order_book(token_id, book, executor):
                                         if abs(pct_move) >= PRICE_THRESHOLD:
                                             direction = "UP" if pct_move > 0 else "DOWN"
                                             logger.info(f"🚨 Polymarket signal: {direction} {pct_move*100:.2f}%")
-                                            await executor.execute_signal(direction, mid, "Polymarket")
+                                            await executor.execute_signal(direction, mid)
                                             price_history.clear()
 
                     except json.JSONDecodeError:
                         pass
 
-        except websockets.exceptions.ConnectionClosedError as e:
-            logger.warning(f"Polymarket WS disconnected: {e}")
-            await asyncio.sleep(2)
         except Exception as e:
             logger.error(f"Polymarket WS error: {e}")
             await asyncio.sleep(5)
@@ -281,13 +282,14 @@ async def main():
     logger.info("🚀 BTC Sniper (Polymarket + Binance Edge)")
     await notifier.send("🚀 BTC Sniper started – Polymarket WebSocket + Binance edge")
 
+    # Start web server in background thread
+    Thread(target=run_webserver, daemon=True).start()
+    logger.info("🌐 Web server started on port 10000")
+
     book = PolymarketOrderBook()
     executor = PolymarketExecutor(MARKET_TOKEN_ID)
+    binance_feed = BinancePriceFeed()
 
-    # Start Binance feed (adds the edge)
-    binance_feed = BinancePriceFeed(executor, threshold=PRICE_THRESHOLD)
-
-    # Run both tasks concurrently
     try:
         await asyncio.gather(
             stream_order_book(MARKET_TOKEN_ID, book, executor),
